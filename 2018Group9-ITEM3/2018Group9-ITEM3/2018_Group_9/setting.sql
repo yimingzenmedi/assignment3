@@ -1,0 +1,10 @@
+create database IF NOT EXISTS `etherpad_lite_db`;
+FLUSH PRIVILEGES;
+grant all privileges  on *.* to root@'%' identified by "root";
+FLUSH PRIVILEGES;
+INSERT INTO mysql.user (User,Host,authentication_string,ssl_cipher,x509_issuer,x509_subject) VALUES('etherpaduser','%',PASSWORD('etherpad'),'','','');
+FLUSH PRIVILEGES;
+grant all privileges  on *.* to root@'%' identified by "root";
+FLUSH PRIVILEGES;
+grant all privileges  on *.* to 'etherpaduser'@'%' identified by 'etherpad';
+FLUSH PRIVILEGES;

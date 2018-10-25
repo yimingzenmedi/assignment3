@@ -1,0 +1,23 @@
+- name: Load Testing
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  become: yes
+  vars:
+    - management_ip_addr: 127.0.0.1
+  
+  tasks:
+   - name: Install ApacheBench
+     apt :
+       name: "{{item}}"
+       state: present
+       update_cache: yes
+     loop:
+       - apache2-utils
+   
+   - name: Run load test
+     shell: |
+       ab -n 5000 -c 10 http://{{ ip }}/ >> /root/test_result.txt 2>&1
+  
+   - name: Copy report to the managerment server
+     shell: scp /root/test_result.txt root@{{ ip }}:/usr/share/nginx/html/download/test_result.txt

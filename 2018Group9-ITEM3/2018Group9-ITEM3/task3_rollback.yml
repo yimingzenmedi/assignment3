@@ -1,0 +1,80 @@
+- name: Restore Database
+  hosts: localhost
+  connection: local
+  become: yes
+  gather_facts: yes
+
+  vars:
+    private_ip: '{{private_ip}}'
+    time: '{{time}}'
+    service_account_email: 
+    credentials_file: 
+    project_id: "{{ lookup('file', '/home/project_id.txt') }}"
+    machine_type: n1-standard-1 
+    image: ubuntu-1604-xenial-v20180814
+    
+  tasks:
+    - name: create a recovery directory
+      shell:  gzip -d /backup/mysql/{{ time }}/etherpad_lite_db.sql.gz
+
+    - name: create database and users
+      mysql_db:
+        login_user: root
+        login_password: root
+        state: import
+        name: all
+        target: ~/2018_Group_9/setting.sql
+    
+    - name: restore databases
+      shell: mysql -u root -proot etherpad_lite_db < /backup/mysql/{{ time }}/etherpad_lite_db.sql
+   
+    - name: modify the json file
+      lineinfile:
+        dest: ~/2018_Group_9/settings.json
+        regexp: '^(.*)"host"    :(.*)$' 
+        line: '                   "host"    : "{{ private_ip }}",'
+        backrefs: yes
+        
+    - name: Launch Multiple Web Servers
+      gce:
+        instance_names: webserver1,webserver2,webserver3
+        machine_type: "{{ machine_type }}"
+        image: "{{ image }}"
+        service_account_email: "{{ service_account_email }}"
+        zone: "australia-southeast1-b"
+        tags:
+          - http-server
+          - https-server
+        credentials_file: "{{ credentials_file }}"
+        project_id: "{{ project_id }}"
+      register: gce
+    
+    - name: Wait for SSH to come up
+      wait_for: host={{ item.public_ip }} port=22 delay=10 timeout=60
+      loop: "{{ gce.instance_data }}"
+
+    - name: Add host to groupname 
+      add_host: hostname={{ item.public_ip }} groupname=web_server
+      loop: "{{ gce.instance_data }}"
+    
+- name: Rebuild Web Servers
+  hosts: web_server
+  connection: ssh
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: reboot web servers
+      reboot:
+    
+    - name: copy settings.json
+      copy: 
+        src: ~/2018_Group_9/settings.json
+        dest: ~/etherpad-lite/settings.json   
+        
+    - name: restart etherpad
+      shell: sh ~/2018_Group_9/demo.sh
+      async: 31536000
+      poll: 0
+    
+    - name: waiting for installation of etherpad
+      wait_for: host=127.0.0.1 port=80 delay=10 timeout=600
