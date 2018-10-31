@@ -1,0 +1,236 @@
+---
+- name: Create instance
+  hosts: localhost
+  vars:
+    service_account_email:
+    credentials_file:
+    database_name: 
+  tasks:
+# -----------------------Set up instances-----------------------
+  - name: Query project id
+    shell: curl http://metadata.google.internal/computeMetadata/v1/project/project-id -H "Metadata-Flavor:Google"
+    register: project_id
+
+  - debug: 
+      msg: "Your project_id is {{ project_id.stdout }}"
+
+  - name: Create lb instance
+    gce:
+      instance_names: lb
+      zone: asia-east1-a
+      machine_type: f1-micro
+      image: ubuntu-1604-xenial-v20180912
+      state: present
+      service_account_email: "{{ service_account_email }}"
+      credentials_file: "{{ credentials_file }}"
+      project_id: "{{ project_id.stdout }}"
+      metadata : '{ "startup-script" : "apt-get update" }'
+      tags: http-server
+    register: lb
+
+  - name: Wait for instance' initializing
+    wait_for: 
+      host: "{{ item.public_ip }}" 
+      port: 22 
+      delay: 10 
+      timeout: 120
+    loop: "{{ lb.instance_data }}"
+    
+  - name: Add Hosts
+    add_host: 
+      hostname: "{{ item.public_ip }}" 
+      groupname: lb
+    loop: "{{ lb.instance_data }}"
+
+  - name: Create instances
+    gce:
+      instance_names: instance1,instance2
+      zone: asia-east1-a
+      machine_type: f1-micro
+      image: ubuntu-1604-xenial-v20180912
+      state: present
+      service_account_email: "{{ service_account_email }}"
+      credentials_file: "{{ credentials_file }}"
+      project_id: "{{ project_id.stdout }}"
+      metadata : '{ "startup-script" : "apt-get update" }'
+      tags: http-server
+    register: gce
+
+  - name: Wait for instances' initializing
+    wait_for: 
+      host: "{{ item.public_ip }}" 
+      port: 22 
+      delay: 10 
+      timeout: 120
+    loop: "{{ gce.instance_data }}"
+    
+  - name: Add instances Hosts
+    add_host: 
+      hostname: "{{ item.public_ip }}" 
+      groupname: instances
+    loop: "{{ gce.instance_data }}"
+
+  - name: Add hosts into lb config file
+    lineinfile:
+      path: ~/2018_Group_8/loadbalancer/lb
+      insertafter: "upstream  mediawiki {"
+      line: "    server {{ item.public_ip }}:80;"
+      state: present
+    loop: "{{ gce.instance_data }}"
+
+  - pause:
+      minutes: 1
+
+# -----------------------Configure Load Balancer instance-----------------------
+- name: Create load banlacer
+  hosts: lb
+  become: yes
+  tasks:
+  - name: Install nginx
+    apt: 
+      name: nginx
+      state: present
+      update_cache: yes
+  
+  - name: Move nginx config file 
+    copy: 
+      src: ~/2018_Group_8/loadbalancer/lb
+      dest: /etc/nginx/sites-available/lb
+      force: yes
+
+  - name: Create config file link
+    file:
+      src: /etc/nginx/sites-available/lb
+      dest: /etc/nginx/sites-enabled/default
+      state: link
+    notify:
+      - restart nginx
+  
+  handlers:
+    - name: restart nginx
+      service: 
+        name: nginx 
+        state: restarted
+
+# -----------------------Create and Configure database instance-----------------------
+- name: Create and configure database instance
+  hosts: localhost
+  tasks:
+  - name: Query project id
+    shell: curl http://metadata.google.internal/computeMetadata/v1/project/project-id -H "Metadata-Flavor:Google"
+    register: project_id
+
+  - name: Create database instance. It may take a few minutes.
+    gcp_sql_instance:
+      name: "{{ database_name }}"
+      settings:
+        tier: db-n1-standard-1
+        ip_configuration:
+          authorized_networks:
+          - name: All IP
+            value: 0.0.0.0/0
+      project: "{{ project_id.stdout }}"
+      region: australia-southeast1
+      auth_kind: "serviceaccount"
+      service_account_file: "/root/key.json"
+      state: present
+    register: db
+   
+  - name: Create a database
+    gcp_sql_database:
+        name: wiki
+        charset: utf8
+        instance: "{{ db }}"
+        project: "{{ project_id.stdout }}"
+        auth_kind: "serviceaccount"
+        service_account_file: "/root/key.json"
+        state: present
+   
+  - name: Set database password
+    shell: gcloud sql users set-password root % --instance {{ database_name }} --password myrootpassword.
+
+  - name: Add Hosts
+    add_host: 
+      hostname: "{{ db.ipAddresses[0].ipAddress }}"
+      groupname: db
+
+# -----------------------Init backend instances-----------------------
+- name: Install MediaWiki on instances
+  hosts: instances
+  become: yes
+  tasks:
+  - name: Install dependencies
+    apt: 
+      name: "{{ item }}"
+      state: present
+      update_cache: yes
+    loop: 
+      - apache2
+      - mysql-server
+      - php7.0
+      - libapache2-mod-php
+      - git
+      - php-mysql
+      - php-xml
+      - php-mbstring
+      - python-mysqldb
+
+  - name: restart apache2
+    service: 
+      name: apache2 
+      state: restarted
+  
+  - name: Remove files in html
+    shell: rm -rf /var/www/html/*
+
+  - name: Download MediaWiki
+    unarchive:
+      src: https://releases.wikimedia.org/mediawiki/1.31/mediawiki-1.31.0.tar.gz
+      dest: ~/
+      remote_src: yes
+  
+  - name: Move files to HTTP ROOT.
+    shell: mv ~/mediawiki-1.31.0/* /var/www/html/
+
+# -----------------------Install and configure instances-----------------------
+- name: MediaWiki Installiation and configuration
+  hosts: instances
+  serial: 1
+  tasks:
+  - name: Install MediaWiki
+    shell: php /var/www/html/maintenance/install.php --dbserver={{ item }} --dbuser=root --dbpass=myrootpassword. --dbname=wiki --pass=adminadmin --confpath=/var/www/html/ --scriptpath=/.  "Group 8's Wiki" "admin"
+    with_inventory_hostnames:
+      - db
+  
+  - name: Set shared db
+    lineinfile: 
+      path: /var/www/html/LocalSettings.php
+      line: "\n# Shared DB settings\n$wgSharedDB = 'wiki';"
+  
+  - name: Query IP
+    shell: curl ifconfig.co
+    register: ipitem
+
+  - name: Output Server IP
+    lineinfile:
+      path: /var/www/html/includes/OutputPage.php
+      insertafter: "public function getPageTitle"
+      line: "return ($this->mPagetitle).' - This HTML rendered by {{ ipitem.stdout }}';"
+    notify:
+      - restart apache2
+
+  - name: Update mediawiki
+    shell: php /var/www/html/maintenance/update.php
+
+  handlers: 
+    - name: restart apache2
+      service: 
+        name: apache2 
+        state: restarted
+
+- name: Print link for MediaWiki(s) installed just now.
+  hosts: localhost
+  tasks:
+    - debug: 
+        msg: Now, you can access MediaWiki by http://{{ item.public_ip }}/ .
+      loop: "{{ lb.instance_data }}"
